@@ -1,81 +1,90 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
-const { Boom } = require('@hapi/boom');
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
+import qrcode from "qrcode-terminal";
+import { Boom } from "@hapi/boom";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// Fix __dirname for ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    const sock = makeWASocket({ auth: state });
+  const authPath = path.join(__dirname, "auth_info");
+  const { state, saveCreds } = await useMultiFileAuthState(authPath);
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: true, // shows QR automatically in terminal
+  });
 
-    sock.ev.on('creds.update', saveCreds);
+  sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, qr, lastDisconnect } = update;
+  sock.ev.on("connection.update", (update) => {
+    const { connection, qr, lastDisconnect } = update;
 
-        if (qr) {
-            console.log("📲 Scan the QR code below:");
-            qrcode.generate(qr, { small: true });
-        }
+    if (qr) {
+      console.log("📲 Scan the QR code below:");
+      qrcode.generate(qr, { small: true });
+    }
 
-        if (connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log("❌ Disconnected. Reconnecting:", shouldReconnect);
-            if (shouldReconnect) startBot();
-        }
+    if (connection === "close") {
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log("❌ Disconnected. Reconnecting:", shouldReconnect);
+      if (shouldReconnect) startBot();
+    }
 
-        if (connection === 'open') {
-            console.log("✅ Bot connected and ready.");
-        }
-    });
+    if (connection === "open") {
+      console.log("✅ Bot connected and ready.");
+    }
+  });
 
-    sock.ev.on('messages.upsert', async ({ messages }) => {
+  sock.ev.on("messages.upsert", async ({ messages }) => {
     const msg = messages[0];
-    if (!msg.message || !msg.key.remoteJid.endsWith('@g.us')) return;
+    if (!msg.message || !msg.key.remoteJid.endsWith("@g.us")) return;
 
-    const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
-    const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+    const text =
+      msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+    const mentionedJids =
+      msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const quotedContext = msg.message?.extendedTextMessage?.contextInfo;
-    const botId = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+    const botId = sock.user.id;
 
-    const isTagAll = text.toLowerCase().includes('tagall');
-    const isBotMentioned = mentionedJids.includes(botId);
+    const isTagAll = text.toLowerCase().includes("tagall");
+    const isBotMentioned = mentionedJids.some(jid => jid.startsWith(botId.split(":")[0]));
     const isReply = Boolean(quotedContext?.quotedMessage);
 
-    if (isTagAll && isBotMentioned) {
-        const groupMeta = await sock.groupMetadata(msg.key.remoteJid);
-        const members = groupMeta.participants
-            .map(p => p.id)
-            .filter(id => id !== botId); // remove bot from tag list
+    if (isTagAll) {
+      const groupMeta = await sock.groupMetadata(msg.key.remoteJid);
+      const members = groupMeta.participants
+        .map((p) => p.id)
+        .filter((id) => id !== botId);
 
-        const tagMessage = members.map(m => `@${m.split('@')[0]}`).join(' ');
+      const tagMessage = members.map((m) => `@${m.split("@")[0]}`).join(" ");
 
-        if (isReply) {
-            // ✅ Reply to original message that was replied to
-            const quotedMessage = {
-                key: {
-                    remoteJid: msg.key.remoteJid,
-                    fromMe: false,
-                    id: quotedContext.stanzaId,
-                    participant: quotedContext.participant
-                },
-                message: quotedContext.quotedMessage
-            };
+      if (isReply) {
+        const quotedMessage = {
+          key: {
+            remoteJid: msg.key.remoteJid,
+            fromMe: false,
+            id: quotedContext.stanzaId,
+            participant: quotedContext.participant,
+          },
+          message: quotedContext.quotedMessage,
+        };
 
-            await sock.sendMessage(msg.key.remoteJid, {
-                text: tagMessage,
-                mentions: members
-            }, {
-                quoted: quotedMessage
-            });
-        } else {
-            // ✅ Send a regular group message
-            await sock.sendMessage(msg.key.remoteJid, {
-                text: tagMessage,
-                mentions: members
-            });
-        }
+        await sock.sendMessage(
+          msg.key.remoteJid,
+          { text: tagMessage, mentions: members },
+          { quoted: quotedMessage }
+        );
+      } else {
+        await sock.sendMessage(msg.key.remoteJid, {
+          text: tagMessage,
+          mentions: members,
+        });
+      }
     }
-});
-
+  });
 }
 
 startBot();
