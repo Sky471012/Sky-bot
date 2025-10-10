@@ -132,6 +132,9 @@ function getQuotedMessage(msg) {
 async function startBot(backoffMs = 1000) {
   try {
     const authFile = path.join(__dirname, "auth.json"); // single file for creds
+    if (process.env.AUTH_CREDS) {
+      fs.writeFileSync(authFile, process.env.AUTH_CREDS, "utf8");
+    }
     const { state, saveState } = useSingleFileAuthState(authFile);
 
     const sock = makeWASocket({ auth: state });
