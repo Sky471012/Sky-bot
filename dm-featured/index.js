@@ -95,6 +95,35 @@ async function extractMentionedJids(msg, sock, meta) {
   return Array.from(new Set(resolved)).filter((j) => groupIds.has(j));
 }
 
+/* ----------------- 👤 SELF-JID HELPERS ----------------- */
+function normalizeJid(jid = "") {
+  const match = jid.match(/(\d{6,15})/);
+  return match ? match[1] : "";
+}
+
+function getSelfJid(sock) {
+  return normalizeJid(sock?.user?.id || sock?.user?.jid || "");
+}
+
+function getQuotedMessage(msg) {
+  const type = getContentType(msg.message);
+  const ctx =
+    msg.message?.[type]?.contextInfo ||
+    msg.message?.extendedTextMessage?.contextInfo;
+
+  if (!ctx?.quotedMessage) return null;
+
+  return {
+    key: {
+      remoteJid: msg.key.remoteJid,
+      fromMe: false,
+      id: ctx.stanzaId,
+      participant: ctx.participant || ctx.remoteJid,
+    },
+    message: ctx.quotedMessage,
+  };
+}
+
 /* ----------------- 🧩 BOT START ----------------- */
 async function startBot(backoffMs = 1000) {
   try {
@@ -177,16 +206,23 @@ async function startBot(backoffMs = 1000) {
         /* ----------------- !tagall ----------------- */
         if (cmd === CMD_TAGALL && isGroup) {
           const meta = await sock.groupMetadata(remoteJid);
-          const members = meta.participants.map((p) => p.id);
+          const selfDigits = getSelfJid(sock);
+          const members = meta.participants
+            .map((p) => p.jid || p.id) // ✅ Prefer the real JID if available
+            .filter(Boolean)
+            .filter((jid) => normalizeJid(jid) !== selfDigits);
+
           const chunks = chunkArray(members, 20);
           for (const chunk of chunks) {
             const tagMessage = chunk
               .map((m) => `@${m.split("@")[0]}`)
               .join(" ");
-            await sock.sendMessage(remoteJid, {
-              text: tagMessage,
-              mentions: chunk,
-            });
+            const quoted = getQuotedMessage(msg);
+            await sock.sendMessage(
+              remoteJid,
+              { text: tagMessage, mentions: chunk },
+              quoted ? { quoted } : {}
+            );
             await new Promise((r) => setTimeout(r, 400));
           }
           return;
@@ -294,23 +330,56 @@ async function startBot(backoffMs = 1000) {
           }
         }
 
-        /* ----------------- !tag<name> ----------------- */
+        /* ----------------- !tag<name> (only tag members present in THIS group) ----------------- */
         if (cmd.startsWith("tag") && cmd !== CMD_TAGALL) {
           const name = cmd.slice(3).toLowerCase();
-          const list = db[remoteJid]?.[name] || db.global?.[name] || [];
-          if (!list.length) {
+
+          // 1) Fetch saved subgroup list (group-local first, then global fallback)
+          const rawList = db[remoteJid]?.[name] || db.global?.[name] || [];
+          if (!rawList.length) {
             await sock.sendMessage(remoteJid, {
               text: `No members in subgroup *${name}*.`,
             });
             return;
           }
-          const chunks = chunkArray(list, 20);
+
+          // 2) Build a map of current group's participants -> normalized digits
+          const meta = await sock.groupMetadata(remoteJid);
+          const selfDigits = getSelfJid(sock);
+
+          const presentMap = new Map(); // digits -> actual JID in this group
+          for (const p of meta.participants || []) {
+            const jid = p?.jid || p?.id;
+            const d = normalizeJid(jid);
+            if (d && d !== selfDigits) presentMap.set(d, jid);
+          }
+
+          // 3) Intersect subgroup members with present participants
+          const finalMentions = [];
+          for (const j of rawList) {
+            const d = normalizeJid(j);
+            const mapped = d && presentMap.get(d);
+            if (mapped) finalMentions.push(mapped);
+          }
+
+          // 4) Dedupe and send
+          const mentions = Array.from(new Set(finalMentions));
+          if (!mentions.length) {
+            await sock.sendMessage(remoteJid, {
+              text: `No members of subgroup *${name}* are present in this group.`,
+            });
+            return;
+          }
+
+          const chunks = chunkArray(mentions, 20);
           for (const chunk of chunks) {
             const msgText = chunk.map((m) => `@${m.split("@")[0]}`).join(" ");
-            await sock.sendMessage(remoteJid, {
-              text: msgText,
-              mentions: chunk,
-            });
+            const quoted = getQuotedMessage(msg);
+            await sock.sendMessage(
+              remoteJid,
+              { text: msgText, mentions: chunk },
+              quoted ? { quoted } : {}
+            );
             await new Promise((r) => setTimeout(r, 400));
           }
           return;
