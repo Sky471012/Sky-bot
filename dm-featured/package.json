@@ -9,6 +9,7 @@
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^6.7.20",
+    "express": "^5.1.0",
     "qrcode-terminal": "^0.12.0"
   }
 }
