@@ -411,3 +411,12 @@ async function startBot(backoffMs = 1000) {
 }
 
 startBot().catch(console.error);
+
+// 🔴 this is REQUIRED for Render
+app.get("/", (req, res) => {
+  res.send("WhatsApp Bot is running 🚀");
+});
+
+app.listen(port, () => {
+  console.log(`✅ Server running on port ${port}`);
+})
