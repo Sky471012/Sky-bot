@@ -389,6 +389,30 @@ async function startBot(backoffMs = 1000) {
           return;
         }
 
+        /* ----------------- !arnav bhai ----------------- */
+        if (trimmed.toLowerCase() === "!arnav bhai") {
+          try {
+            // Path to your sticker (must be in .webp format)
+            const stickerPath = path.join(__dirname, "stickers", "arnav.webp");
+
+            if (!fs.existsSync(stickerPath)) {
+              await sock.sendMessage(remoteJid, {
+                text: "⚠️ Sticker not found! Please add `arnav.webp` in /stickers folder.",
+              });
+              return;
+            }
+
+            const stickerBuffer = fs.readFileSync(stickerPath);
+
+            await sock.sendMessage(remoteJid, {
+              sticker: stickerBuffer,
+            });
+          } catch (err) {
+            console.error("💥 Error sending sticker:", err);
+          }
+          return;
+        }
+
         /* ----------------- !help ----------------- */
         if (cmd === "help") {
           await sock.sendMessage(remoteJid, {
@@ -423,4 +447,4 @@ app.get("/", (req, res) => {
 
 app.listen(port, () => {
   console.log(`✅ Server running on port ${port}`);
-})
+});
