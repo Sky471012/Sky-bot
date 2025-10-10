@@ -8,6 +8,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import qrcode from "qrcode-terminal";
+import express from "express";
 
 const app = express();
 const port = 3000;
