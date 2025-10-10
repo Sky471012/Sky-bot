@@ -1,5 +1,5 @@
 import makeWASocket, {
-  useMultiFileAuthState,
+  useSingleFileAuthState,
   DisconnectReason,
   getContentType,
 } from "@whiskeysockets/baileys";
@@ -131,13 +131,12 @@ function getQuotedMessage(msg) {
 /* ----------------- 🧩 BOT START ----------------- */
 async function startBot(backoffMs = 1000) {
   try {
-    const authPath = path.join(__dirname, "auth_info");
-    if (!fs.existsSync(authPath)) fs.mkdirSync(authPath, { recursive: true });
+    const authFile = path.join(__dirname, "auth.json"); // single file for creds
+    const { state, saveState } = useSingleFileAuthState(authFile);
 
-    const { state, saveCreds } = await useMultiFileAuthState(authPath);
     const sock = makeWASocket({ auth: state });
 
-    sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("creds.update", saveState);
 
     sock.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -423,4 +422,4 @@ app.get("/", (req, res) => {
 
 app.listen(port, () => {
   console.log(`✅ Server running on port ${port}`);
-})
+});
