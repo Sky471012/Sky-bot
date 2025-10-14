@@ -9,6 +9,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import qrcode from "qrcode-terminal";
 import express from "express";
+import { fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -135,7 +136,14 @@ async function startBot(backoffMs = 1000) {
     if (!fs.existsSync(authPath)) fs.mkdirSync(authPath, { recursive: true });
 
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
-    const sock = makeWASocket({ auth: state });
+    const { version } = await fetchLatestBaileysVersion();
+
+    const sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: true,
+      browser: ["Ubuntu", "Chrome", "22.04.4"], // keep for consistency
+    });
 
     sock.ev.on("creds.update", saveCreds);
 
