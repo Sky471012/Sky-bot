@@ -23,6 +23,7 @@ const DATA_DIR = path.join(__dirname, "data");
 const GROUPS_DB = path.join(DATA_DIR, "subgroups.json");
 
 let restarting = false;
+let sock;
 
 /* ----------------- 🔐 OWNER CONFIG ----------------- */
 const OWNER_JIDS = [
@@ -131,6 +132,11 @@ function getQuotedMessage(msg) {
 
 /* ----------------- 🧩 BOT START ----------------- */
 async function startBot(backoffMs = 1000) {
+  if (sock) {
+    console.log("⚠️ Socket already exists, skipping restart");
+    return;
+  }
+
   try {
     const authPath = path.join(__dirname, "auth_info");
     if (!fs.existsSync(authPath)) fs.mkdirSync(authPath, { recursive: true });
@@ -138,48 +144,50 @@ async function startBot(backoffMs = 1000) {
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
     const { version } = await fetchLatestBaileysVersion();
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
       version,
       auth: state,
-      printQRInTerminal: true,
-      browser: ["Ubuntu", "Chrome", "22.04.4"], // keep for consistency
+
+      printQRInTerminal: false,
+
+      // ✅ Correct SMBA fingerprint
+      browser: ["Android", "Chrome", "121.0.0"],
+      platform: "smba",
+
+      keepAliveIntervalMs: 30000,
+      markOnlineOnConnect: true,
     });
 
     sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on("connection.update", (update) => {
-      const { connection, lastDisconnect, qr } = update;
-      if (qr) {
-        console.log("📱 Scan this QR to connect your WhatsApp:");
-        qrcode.generate(qr, { small: true });
+    let pairingRequested = false;
+
+    sock.ev.on("connection.update", async (update) => {
+      const { connection } = update;
+
+      if (
+        connection === "connecting" &&
+        !pairingRequested &&
+        !state.creds.registered
+      ) {
+        pairingRequested = true;
+
+        // ⏳ CRITICAL delay for SMBA
+        await new Promise((r) => setTimeout(r, 1500));
+
+        try {
+          const code = await sock.requestPairingCode("918929676776");
+          console.log("🔐 PAIRING CODE:", code);
+        } catch (err) {
+          console.error(
+            "❌ Pairing code request failed:",
+            err?.output?.statusCode || err.message
+          );
+        }
       }
 
       if (connection === "open") {
         console.log("✅ Bot connected and ready!");
-        restarting = false;
-      } else if (connection === "close") {
-        const err = lastDisconnect?.error;
-        const statusCode =
-          (err instanceof Boom && err.output?.statusCode) ||
-          err?.output?.statusCode ||
-          err?.statusCode;
-
-        const loggedOut = statusCode === DisconnectReason.loggedOut;
-        const shouldReconnect = !loggedOut;
-        console.log("❌ Disconnected.", { statusCode, loggedOut });
-
-        if (shouldReconnect && !restarting) {
-          restarting = true;
-          const nextBackoff = Math.min(backoffMs * 2, 30000);
-          setTimeout(
-            () => startBot(nextBackoff).catch(console.error),
-            backoffMs
-          );
-        } else if (loggedOut) {
-          console.error(
-            "🔒 Logged out. Delete auth_info folder to re-authenticate."
-          );
-        }
       }
     });
 
@@ -210,7 +218,10 @@ async function startBot(backoffMs = 1000) {
         if (!db[groupKey]) db[groupKey] = {};
 
         /* 🧩 DM PERMISSION CHECK */
-        if (!isGroup && !OWNER_JIDS.includes(sender)) {
+        if (
+          !isGroup &&
+          (!sender.endsWith("@s.whatsapp.net") || !OWNER_JIDS.includes(sender))
+        ) {
           console.log(`❌ Ignored DM from unauthorized user: ${sender}`);
           return;
         }
