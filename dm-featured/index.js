@@ -176,7 +176,7 @@ async function startBot(backoffMs = 1000) {
         await new Promise((r) => setTimeout(r, 1500));
 
         try {
-          const code = await sock.requestPairingCode("918929676776");
+          const code = await sock.requestPairingCode("919911595299");
           console.log("🔐 PAIRING CODE:", code);
         } catch (err) {
           console.error(
