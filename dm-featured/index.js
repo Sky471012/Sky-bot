@@ -163,33 +163,72 @@ async function startBot(backoffMs = 1000) {
     let pairingRequested = false;
 
     sock.ev.on("connection.update", async (update) => {
-      const { connection } = update;
+  const { connection, lastDisconnect, qr } = update;
 
-      if (
-        connection === "connecting" &&
-        !pairingRequested &&
-        !state.creds.registered
-      ) {
-        pairingRequested = true;
+  // Handle QR code if generated
+  if (qr && !state.creds.registered) {
+    console.log("📱 QR Code generated (scanning not enabled)");
+  }
 
-        // ⏳ CRITICAL delay for SMBA
-        await new Promise((r) => setTimeout(r, 1500));
+  // Request pairing code once when connecting and not registered
+  if (
+    connection === "connecting" &&
+    !pairingRequested &&
+    !state.creds.registered
+  ) {
+    pairingRequested = true;
 
-        try {
-          const code = await sock.requestPairingCode("918929676776");
-          console.log("🔐 PAIRING CODE:", code);
-        } catch (err) {
-          console.error(
-            "❌ Pairing code request failed:",
-            err?.output?.statusCode || err.message
-          );
-        }
-      }
+    // ⏳ CRITICAL delay for SMBA
+    await new Promise((r) => setTimeout(r, 2000)); // Increased to 2s
 
-      if (connection === "open") {
-        console.log("✅ Bot connected and ready!");
-      }
-    });
+    try {
+      const code = await sock.requestPairingCode("918929676776");
+      console.log("🔐 PAIRING CODE:", code);
+      console.log("⏳ Enter this code in WhatsApp > Linked Devices within 60 seconds");
+    } catch (err) {
+      console.error(
+        "❌ Pairing code request failed:",
+        err?.output?.statusCode || err.message
+      );
+      pairingRequested = false; // Reset to allow retry
+    }
+  }
+
+  // Connection opened successfully
+  if (connection === "open") {
+    console.log("✅ Bot connected and ready!");
+    console.log("📱 Logged in as:", sock.user?.id);
+    pairingRequested = false; // Reset for future reconnections
+  }
+
+  // Handle disconnections
+  if (connection === "close") {
+    const shouldReconnect =
+      (lastDisconnect?.error as Boom)?.output?.statusCode !==
+      DisconnectReason.loggedOut;
+
+    console.log(
+      "🔴 Connection closed. Reconnect:",
+      shouldReconnect,
+      "Reason:",
+      lastDisconnect?.error?.message
+    );
+
+    if (shouldReconnect && !restarting) {
+      restarting = true;
+      sock = null;
+      
+      // Wait before reconnecting
+      setTimeout(() => {
+        restarting = false;
+        startBot().catch(console.error);
+      }, 3000);
+    } else if (!shouldReconnect) {
+      console.log("❌ Logged out. Delete auth_info folder to login again.");
+      sock = null;
+    }
+  }
+});
 
     /* ----------------- 📩 MESSAGE HANDLER ----------------- */
     sock.ev.on("messages.upsert", async (upsert) => {
