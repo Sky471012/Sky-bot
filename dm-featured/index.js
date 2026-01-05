@@ -139,16 +139,51 @@ async function startBot(backoffMs = 1000) {
 
   try {
     const authPath = path.join(__dirname, "auth_info");
-    if (!fs.existsSync(authPath)) fs.mkdirSync(authPath, { recursive: true });
+
+    // ✅ Validate and clean up corrupted credentials
+    const credsPath = path.join(authPath, "creds.json");
+    if (fs.existsSync(credsPath)) {
+      try {
+        const creds = JSON.parse(fs.readFileSync(credsPath, "utf8"));
+
+        // Check if credentials are corrupted or incomplete
+        const hasValidMe =
+          creds.me?.id && creds.me.id.includes("@s.whatsapp.net");
+        const isRegistered = creds.registered === true;
+
+        if (isRegistered && !hasValidMe) {
+          console.log(
+            "⚠️ Corrupted credentials detected (incomplete registration)"
+          );
+          console.log("🗑️ Deleting auth_info folder...");
+          fs.rmSync(authPath, { recursive: true, force: true });
+        } else if (isRegistered && hasValidMe) {
+          console.log("✅ Found existing valid credentials");
+          console.log("📱 Account:", creds.me.id);
+        }
+      } catch (parseErr) {
+        console.log("⚠️ Failed to parse credentials, cleaning up...");
+        fs.rmSync(authPath, { recursive: true, force: true });
+      }
+    }
+
+    if (!fs.existsSync(authPath)) {
+      fs.mkdirSync(authPath, { recursive: true });
+      console.log("🆕 Starting fresh authentication...");
+    }
 
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
     const { version } = await fetchLatestBaileysVersion();
 
+    console.log("📡 Baileys version:", version.join("."));
+
     sock = makeWASocket({
       version,
       auth: state,
-
       printQRInTerminal: false,
+
+      // ✅ Disable QR generation completely
+      generateHighQualityLinkPreview: true,
 
       // ✅ Correct SMBA fingerprint
       browser: ["Android", "Chrome", "121.0.0"],
@@ -156,6 +191,9 @@ async function startBot(backoffMs = 1000) {
 
       keepAliveIntervalMs: 30000,
       markOnlineOnConnect: true,
+
+      // ✅ Force mobile connection type
+      defaultQueryTimeoutMs: undefined,
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -163,72 +201,129 @@ async function startBot(backoffMs = 1000) {
     let pairingRequested = false;
 
     sock.ev.on("connection.update", async (update) => {
-  const { connection, lastDisconnect, qr } = update;
+      const { connection, lastDisconnect, qr, isNewLogin } = update;
 
-  // Handle QR code if generated
-  if (qr && !state.creds.registered) {
-    console.log("📱 QR Code generated (scanning not enabled)");
-  }
+      // Log all connection states for debugging
+      if (connection) {
+        console.log("🔄 Connection status:", connection);
+      }
 
-  // Request pairing code once when connecting and not registered
-  if (
-    connection === "connecting" &&
-    !pairingRequested &&
-    !state.creds.registered
-  ) {
-    pairingRequested = true;
+      // ❌ Ignore QR codes - we only use pairing codes
+      if (qr) {
+        console.log(
+          "⚠️ QR code generated (ignored - using pairing code instead)"
+        );
+        return; // Don't process QR
+      }
 
-    // ⏳ CRITICAL delay for SMBA
-    await new Promise((r) => setTimeout(r, 2000)); // Increased to 2s
+      // Request pairing code ONLY ONCE when first connecting
+      if (connection === "connecting" && !pairingRequested) {
+        // Check if already registered
+        if (state.creds.registered) {
+          console.log("✅ Using existing credentials...");
+          pairingRequested = true; // Prevent re-requesting
+          return;
+        }
 
-    try {
-      const code = await sock.requestPairingCode("918929676776");
-      console.log("🔐 PAIRING CODE:", code);
-      console.log("⏳ Enter this code in WhatsApp > Linked Devices within 60 seconds");
-    } catch (err) {
-      console.error(
-        "❌ Pairing code request failed:",
-        err?.output?.statusCode || err.message
-      );
-      pairingRequested = false; // Reset to allow retry
-    }
-  }
+        pairingRequested = true;
 
-  // Connection opened successfully
-  if (connection === "open") {
-    console.log("✅ Bot connected and ready!");
-    console.log("📱 Logged in as:", sock.user?.id);
-    pairingRequested = false; // Reset for future reconnections
-  }
+        // ⏳ Wait for connection to stabilize
+        await new Promise((r) => setTimeout(r, 3000)); // Increased to 3s
 
-  // Handle disconnections
-  if (connection === "close") {
-    const shouldReconnect =
-      (lastDisconnect?.error as Boom)?.output?.statusCode !==
-      DisconnectReason.loggedOut;
+        try {
+          const code = await sock.requestPairingCode("919911595299");
+          console.log("");
+          console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+          console.log("🔐 PAIRING CODE:", code);
+          console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+          console.log("⏳ Steps:");
+          console.log("1. Open WhatsApp on your phone");
+          console.log("2. Settings → Linked Devices");
+          console.log("3. Link a Device → Link with phone number");
+          console.log("4. Enter code:", code);
+          console.log("5. Wait for connection (don't restart bot!)");
+          console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+          console.log("");
+        } catch (err) {
+          console.error("❌ Pairing failed:", err.message);
 
-    console.log(
-      "🔴 Connection closed. Reconnect:",
-      shouldReconnect,
-      "Reason:",
-      lastDisconnect?.error?.message
-    );
+          // If pairing fails, clean up and retry
+          if (
+            err.message.includes("Conflict") ||
+            err.message.includes("rate")
+          ) {
+            console.log("⏳ Waiting 10s before retry...");
+            await new Promise((r) => setTimeout(r, 10000));
+          }
 
-    if (shouldReconnect && !restarting) {
-      restarting = true;
-      sock = null;
-      
-      // Wait before reconnecting
-      setTimeout(() => {
-        restarting = false;
-        startBot().catch(console.error);
-      }, 3000);
-    } else if (!shouldReconnect) {
-      console.log("❌ Logged out. Delete auth_info folder to login again.");
-      sock = null;
-    }
-  }
-});
+          pairingRequested = false;
+        }
+      }
+
+      // Connection successful
+      if (connection === "open") {
+        console.log("");
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        console.log("✅ BOT CONNECTED SUCCESSFULLY!");
+        console.log("📱 Account:", sock.user?.id);
+        console.log("📛 Name:", sock.user?.name || "N/A");
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        console.log("");
+        pairingRequested = false;
+      }
+
+      // Handle disconnections
+      if (connection === "close") {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const errorMsg = lastDisconnect?.error?.message || "Unknown";
+
+        console.log("");
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        console.log("🔴 DISCONNECTED");
+        console.log("Code:", statusCode);
+        console.log("Reason:", errorMsg);
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        // Check if should reconnect
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+        // Handle specific error codes
+        if (statusCode === 401 || statusCode === 403 || statusCode === 440) {
+          console.log("🗑️ Invalid session - deleting credentials...");
+          fs.rmSync(authPath, { recursive: true, force: true });
+          sock = null;
+          pairingRequested = false;
+
+          // Restart fresh
+          setTimeout(() => {
+            startBot().catch(console.error);
+          }, 2000);
+          return;
+        }
+
+        if (statusCode === DisconnectReason.loggedOut) {
+          console.log("❌ Logged out - manual re-authentication required");
+          console.log("Delete auth_info folder and restart bot");
+          sock = null;
+          return;
+        }
+
+        // Reconnect with backoff
+        if (shouldReconnect && !restarting) {
+          restarting = true;
+          sock = null;
+          pairingRequested = false;
+
+          const delay = Math.min(backoffMs * 1.5, 15000);
+          console.log(`⏳ Reconnecting in ${delay / 1000}s...`);
+
+          setTimeout(() => {
+            restarting = false;
+            startBot(delay).catch(console.error);
+          }, delay);
+        }
+      }
+    });
 
     /* ----------------- 📩 MESSAGE HANDLER ----------------- */
     sock.ev.on("messages.upsert", async (upsert) => {
