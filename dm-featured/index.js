@@ -7,7 +7,6 @@ import { Boom } from "@hapi/boom";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import qrcode from "qrcode-terminal";
 import express from "express";
 import { fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
 
@@ -109,6 +108,31 @@ function normalizeJid(jid = "") {
 
 function getSelfJid(sock) {
   return normalizeJid(sock?.user?.id || sock?.user?.jid || "");
+}
+
+function resolveLidToPhone(lidJid) {
+  // Extract the LID number
+  const lid = normalizeJid(lidJid);
+  if (!lid) return null;
+
+  try {
+    // Try to find the reverse mapping file: lid-mapping-{LID}_reverse.json
+    const authPath = path.join(__dirname, "auth_info");
+    const reverseMappingPath = path.join(authPath, `lid-mapping-${lid}_reverse.json`);
+    
+    if (fs.existsSync(reverseMappingPath)) {
+      const raw = fs.readFileSync(reverseMappingPath, "utf8");
+      // The file contains just the phone number as a JSON string
+      const phoneNumber = JSON.parse(raw);
+      if (phoneNumber) {
+        return `${phoneNumber}@s.whatsapp.net`;
+      }
+    }
+  } catch (err) {
+    console.log(`⚠️ Failed to resolve LID ${lid}:`, err.message);
+  }
+  
+  return null;
 }
 
 function getQuotedMessage(msg) {
@@ -352,12 +376,27 @@ async function startBot(backoffMs = 1000) {
         if (!db[groupKey]) db[groupKey] = {};
 
         /* 🧩 DM PERMISSION CHECK */
-        if (
-          !isGroup &&
-          (!sender.endsWith("@s.whatsapp.net") || !OWNER_JIDS.includes(sender))
-        ) {
-          console.log(`❌ Ignored DM from unauthorized user: ${sender}`);
-          return;
+        if (!isGroup) {
+          let isOwner = false;
+          
+          // Try to resolve sender to phone number
+          let phoneToCheck = sender;
+          
+          // If sender is a LID, try to resolve it using auth mappings
+          if (sender.endsWith('@lid')) {
+            const resolved = resolveLidToPhone(sender);
+            if (resolved) {
+              phoneToCheck = resolved;
+            }
+          }
+          
+          const normalizedPhone = normalizeJid(phoneToCheck);
+          isOwner = OWNER_JIDS.some(ownerJid => normalizeJid(ownerJid) === normalizedPhone);
+          
+          if (!isOwner) {
+            console.log(`❌ Ignored DM from unauthorized user: ${sender}`);
+            return;
+          }
         }
 
         /* ----------------- !tagall ----------------- */
@@ -365,9 +404,13 @@ async function startBot(backoffMs = 1000) {
           const meta = await sock.groupMetadata(remoteJid);
           const selfDigits = getSelfJid(sock);
           const members = meta.participants
-            .map((p) => p.jid || p.id) // ✅ Prefer the real JID if available
-            .filter(Boolean)
-            .filter((jid) => normalizeJid(jid) !== selfDigits);
+            .filter((p) => {
+              // Use phoneNumber for comparison if available (LID groups)
+              const phoneToCheck = p?.phoneNumber || p?.jid || p?.id;
+              return normalizeJid(phoneToCheck) !== selfDigits;
+            })
+            .map((p) => p.jid || p.id) // Return the actual JID for tagging
+            .filter(Boolean);
 
           const chunks = chunkArray(members, 20);
           for (const chunk of chunks) {
@@ -403,7 +446,17 @@ async function startBot(backoffMs = 1000) {
           }
 
           // Manage permissions: only owners can edit
-          if (!OWNER_JIDS.includes(sender)) {
+          let resolvedSender = sender;
+          if (sender.endsWith('@lid')) {
+            const resolved = resolveLidToPhone(sender);
+            if (resolved) resolvedSender = resolved;
+          }
+          
+          const isOwner = OWNER_JIDS.some(ownerJid => 
+            normalizeJid(ownerJid) === normalizeJid(resolvedSender)
+          );
+          
+          if (!isOwner) {
             await sock.sendMessage(remoteJid, {
               text: "🚫 You don’t have permission to manage subgroups.",
             });
@@ -493,6 +546,7 @@ async function startBot(backoffMs = 1000) {
 
           // 1) Fetch saved subgroup list (group-local first, then global fallback)
           const rawList = db[remoteJid]?.[name] || db.global?.[name] || [];
+          
           if (!rawList.length) {
             await sock.sendMessage(remoteJid, {
               text: `No members in subgroup *${name}*.`,
@@ -506,9 +560,17 @@ async function startBot(backoffMs = 1000) {
 
           const presentMap = new Map(); // digits -> actual JID in this group
           for (const p of meta.participants || []) {
-            const jid = p?.jid || p?.id;
-            const d = normalizeJid(jid);
-            if (d && d !== selfDigits) presentMap.set(d, jid);
+            // Use phoneNumber if available (for LID groups), otherwise fall back to jid/id
+            const phoneNumber = p?.phoneNumber;
+            const actualJid = p?.jid || p?.id;
+            
+            if (phoneNumber) {
+              const d = normalizeJid(phoneNumber);
+              if (d && d !== selfDigits) presentMap.set(d, actualJid);
+            } else {
+              const d = normalizeJid(actualJid);
+              if (d && d !== selfDigits) presentMap.set(d, actualJid);
+            }
           }
 
           // 3) Intersect subgroup members with present participants
@@ -521,6 +583,7 @@ async function startBot(backoffMs = 1000) {
 
           // 4) Dedupe and send
           const mentions = Array.from(new Set(finalMentions));
+          
           if (!mentions.length) {
             await sock.sendMessage(remoteJid, {
               text: `No members of subgroup *${name}* are present in this group.`,
